@@ -11,6 +11,8 @@ typedef unsigned nes_addr_t; // 16-bit memory address
 
 #include "Nes_Oscs.h"
 
+extern void write_register_callback(nes_addr_t addr, int data);
+
 struct apu_state_t;
 class Nes_Buffer;
 

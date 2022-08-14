@@ -100,7 +100,7 @@ blargg_err_t Classic_Emu::play_( long count, sample_t* out )
 	long remain = count;
 	while ( remain )
 	{
-		remain -= buf->read_samples( &out [count - remain], remain );
+		remain -= buf->read_samples( &out [count*4 - remain*4], remain );
 		if ( remain )
 		{
 			if ( buf_changed_count != buf->channels_changed_count() )

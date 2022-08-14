@@ -290,10 +290,11 @@ void Nes_Apu::write_register( nes_time_t time, nes_addr_t addr, int data )
 		return;
 	
 	run_until_( time );
-	
-	if ( addr < 0x4014 )
+
+    if ( addr < 0x4014 )
 	{
-		// Write to channel
+        write_register_callback(addr, data);
+    	// Write to channel
 		int osc_index = (addr - start_addr) >> 2;
 		Nes_Osc* osc = oscs [osc_index];
 		
