@@ -1,9 +1,10 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <signal.h>
 
-#include <portaudio.h>
+#include <jack/jack.h>
 
 #include "gme/Multi_Buffer.h"
 #include "gme/Nsf_Emu.h"
@@ -21,7 +22,6 @@ public:
             chan[i].center = &buf[i];
             chan[i].left = &buf[i];
             chan[i].right = &buf[i];
-            printf("index: %d, %d\n", i, &buf[i]);
         }
     }
 	~Quadraphonic_Buffer() {};
@@ -101,14 +101,32 @@ public:
     }
 };
 
-static int patestCallback( const void *inputBuffer, void *outputBuffer,
-                           unsigned long framesPerBuffer,
-                           const PaStreamCallbackTimeInfo* timeInfo,
-                           PaStreamCallbackFlags statusFlags,
-                           void *userData )
+jack_port_t *port0;
+jack_port_t *port1;
+jack_port_t *port2;
+jack_port_t *port3;
+jack_nframes_t sample_rate;
+
+static int process(jack_nframes_t frames, void *arg)
 {
-    Nsf_Emu *emu = (Nsf_Emu *)userData;
-	emu->play( framesPerBuffer, (short *)outputBuffer );
+    jack_default_audio_sample_t *port_buffer_0 = (jack_default_audio_sample_t *)jack_port_get_buffer(port0, frames);
+    jack_default_audio_sample_t *port_buffer_1 = (jack_default_audio_sample_t *)jack_port_get_buffer(port1, frames);
+    jack_default_audio_sample_t *port_buffer_2 = (jack_default_audio_sample_t *)jack_port_get_buffer(port2, frames);
+    jack_default_audio_sample_t *port_buffer_3 = (jack_default_audio_sample_t *)jack_port_get_buffer(port3, frames);
+
+    Nsf_Emu *emu = (Nsf_Emu *)arg;
+    short buffer[frames*4];
+	emu->play( frames, buffer );
+
+    for ( int i = 0; i < frames; i ++ )
+    {
+        port_buffer_0[i] = buffer[i*4+0] / 32767.0;
+        port_buffer_1[i] = buffer[i*4+1] / 32767.0;
+        port_buffer_2[i] = buffer[i*4+2] / 32767.0;
+        port_buffer_3[i] = buffer[i*4+3] / 32767.0;
+    }
+
+    return 0;
 }
 
 void write_register_callback(nes_addr_t addr, int data)
@@ -185,9 +203,40 @@ static void sig_handler(int signo)
         done = true;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
-	const long sample_rate = 48000;
+    if ( argc != 2 )
+    {
+        fprintf(stderr, "Missing command line argument\n");
+        return -1;
+    }
+    int track_num = atoi(argv[1]);
+
+    jack_client_t *client;
+    jack_status_t status;
+
+    printf("Opening client...\n");
+    client = jack_client_open("nsf", JackNoStartServer, &status);
+    if ( !client )
+    {
+        fprintf(stderr, "Could not create client!\n");
+        return -1;
+    }
+
+    jack_nframes_t sample_rate = jack_get_sample_rate(client);
+    printf("Sample rate: %d\n", sample_rate);
+
+    printf("Registering ports...\n");
+    port0 = jack_port_register(client, "Square1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    port1 = jack_port_register(client, "Square2", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    port2 = jack_port_register(client, "Triangle", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    port3 = jack_port_register(client, "Noise", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+
+    if ( port0 == NULL || port1 == NULL || port2 == NULL || port3 == NULL )
+    {
+        fprintf(stderr, "Port registration failed!\n");
+        return -1;
+    }
 
     Nsf_Emu emu;
     Quadraphonic_Buffer buf;
@@ -198,70 +247,32 @@ int main()
 
     printf("Game: %s\n", emu.header().game);
     printf("Author: %s\n", emu.header().author);
-    emu.start_track(8);
+    emu.start_track(track_num);
 
-    PaError err;
-    const PaDeviceInfo *deviceInfo;
-    int numDevices, device_index;
-    err = Pa_Initialize();
-    if( err != paNoError ) goto error;
+    printf("Setting callback...\n");
+    jack_set_process_callback(client, process, &emu);
 
-    numDevices = Pa_GetDeviceCount();
-
-    for( device_index = 0; device_index < numDevices; device_index ++ )
+    printf("Activating...\n");
+    if ( jack_activate(client) )
     {
-        deviceInfo = Pa_GetDeviceInfo(device_index);
-        printf("%d: Name = %s\t", device_index, deviceInfo->name);
-        printf("Max inputs = %d", deviceInfo->maxInputChannels);
-        printf(", Max outputs = %d\n", deviceInfo->maxOutputChannels);
-        // "Scarlett 8i6 USB"
-        // "MacBook Pro Speakers"
-        // "ZOOM U-44 Driver"
-        if ( !strcmp(deviceInfo->name, "Scarlett 8i6 USB") ) 
-        {
-            printf("Matched: %d\n", device_index);
-            break;
-        }
+        fprintf(stderr, "Could not activate!\n");
+        return -1;
     }
-
-    PaStream *stream;
-    PaStreamParameters outputParameters;
-    outputParameters.channelCount = 4;
-    outputParameters.device = device_index;
-    outputParameters.hostApiSpecificStreamInfo = NULL;
-    outputParameters.sampleFormat = paInt16;
-    outputParameters.suggestedLatency = 0;
-    err = Pa_OpenStream(&stream,
-                        NULL,
-                        &outputParameters,
-                        sample_rate,
-                        256,        // frames per buffer
-                        0, // stream flags
-                        patestCallback, // this is your callback function
-                        &emu ); // This is a pointer that will be passed to your callback
-    if( err != paNoError ) goto error;
-
-    err = Pa_StartStream( stream );
-    if( err != paNoError ) goto error;
 
     if ( signal(SIGINT, sig_handler) == SIG_ERR )
         printf("Could set signal handler!\n");
 
-    while ( !done )
-        Pa_Sleep(1000);
+    printf("Making connections...\n");
+    jack_connect(client, "nsf:Square1", "system:playback_1");
+    jack_connect(client, "nsf:Square2", "system:playback_2");
+    jack_connect(client, "nsf:Triangle", "system:playback_3");
+    jack_connect(client, "nsf:Noise", "system:playback_4");
+
+    printf("Sleeping...\n");
+    sleep(-1);
 
     printf("Shutting down...\n");
-
-    err = Pa_StopStream( stream );
-    if( err != paNoError ) goto error;
-
-    err = Pa_CloseStream( stream );
-    if( err != paNoError ) goto error;
-
-    err = Pa_Terminate();
-    if ( err != paNoError ) goto error;	
+    jack_deactivate(client);
+    jack_client_close(client);
 	return 0;
-error:
-    printf(  "PortAudio error: %s\n", Pa_GetErrorText( err ) );
-    return -1;
 }
